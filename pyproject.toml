@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=75,<81"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "eris-ai-service"
+version = "0.1.0"
+description = "AI inference service for ERIS"
+requires-python = ">=3.12,<3.14"
+dependencies = ["fastapi==0.121.0", "uvicorn==0.38.0", "python-dotenv==1.2.1"]
+
+[project.optional-dependencies]
+dev = ["pytest==8.4.2", "httpx==0.28.1", "ruff==0.14.3"]
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 100
