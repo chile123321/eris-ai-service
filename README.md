@@ -32,4 +32,15 @@ node --test integration/node/ai-client.test.cjs
 
 ## Còn chờ dataset thật
 
-Cần xác nhận nguồn và phiên bản dữ liệu, định nghĩa nhãn và thời điểm dự đoán, feature có thể thu thập từ backend, chiến lược split/evaluation và định dạng model artifact. Không đưa dataset, dự đoán cấp nhân viên hoặc model artifact vào Git.
+Cần xác nhận 99.970 giá trị `Hire_Date` chỉ còn phần giờ trong workbook nguồn trước khi dữ liệu có thể được coi là sẵn sàng để train. Không đưa dataset, dự đoán cấp nhân viên hoặc model artifact vào Git.
+
+Chuẩn bị dữ liệu chưa scale và split cố định:
+
+```powershell
+python -m eris_ai.data_preparation `
+  --source-xlsx docs/Extended_Employee_Performance_and_Productivity_Data.xlsx `
+  --clean-reference-csv docs/Cleaned_Employee_Performance_Data_Full_100k.csv `
+  --output-dir data/processed
+```
+
+Lệnh này không fit preprocessing và không train model. Các output trong `data/processed/` bị Git ignore.

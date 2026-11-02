@@ -16,5 +16,8 @@ reports/
 *.csv
 *.tsv
 *.parquet
+docs/*.xlsx
+docs/*.xls
+docs/*.pdf
 build/
 dist/
