@@ -5,16 +5,10 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-from collections import Counter
-from datetime import date, datetime, time
 from pathlib import Path
-from zipfile import ZipFile
-from xml.etree import ElementTree as ET
 
 import numpy as np
 import pandas as pd
-from openpyxl import load_workbook
-from openpyxl.utils import get_column_letter
 from sklearn.model_selection import StratifiedGroupKFold, train_test_split
 
 from eris_ai.preprocessing import EDUCATION_ORDER, EXCLUDED_COLUMNS, FEATURE_COLUMNS
@@ -24,6 +18,8 @@ TARGET_COLUMN = "Resigned"
 ID_COLUMN = "Employee_ID"
 RANDOM_STATE = 42
 FEATURE_SET_VERSION = "employee-performance-v1"
+EXPECTED_SOURCE_SHA256 = "2b1e07caf58e7678a780d428c1a8893a95d9c4a556134fd8e7368db5ed596cdb"
+SOURCE_HIRE_DATE_FORMAT = "%Y-%m-%d %H:%M:%S.%f"
 EXPECTED_SOURCE_COLUMNS = [
     ID_COLUMN,
     "Department",
@@ -68,98 +64,52 @@ def map_target_value(value) -> int:
     raise ValueError(f"Unrecognized Resigned value: {value!r}")
 
 
-def normalize_hire_date(value) -> tuple[str | None, str]:
-    if value is None or (not isinstance(value, (date, datetime, time)) and pd.isna(value)):
-        return None, "missing"
-    if isinstance(value, datetime):
-        return value.date().isoformat(), "calendar_date"
-    if isinstance(value, date):
-        return value.isoformat(), "calendar_date"
-    if isinstance(value, time):
-        return None, "time_only"
-    if isinstance(value, str):
-        stripped = value.strip()
-        if not stripped:
-            return None, "missing"
-        try:
-            parsed = datetime.strptime(stripped, "%Y-%m-%d").date()
-        except ValueError:
-            return None, "unrecognized"
-        return parsed.isoformat(), "calendar_date"
-    return None, "unrecognized"
-
-
-def read_hire_dates(source: Path) -> tuple[pd.Series, dict]:
-    workbook = load_workbook(source, read_only=True, data_only=False)
-    worksheet = workbook.active
-    header_cells = next(worksheet.iter_rows(min_row=1, max_row=1))
-    headers = [cell.value for cell in header_cells]
-    if "Hire_Date" not in headers:
-        raise ValueError("Source workbook does not contain Hire_Date")
-    column_index = headers.index("Hire_Date") + 1
-    normalized: list[str | None] = []
-    statuses: Counter[str] = Counter()
-    number_formats: Counter[str] = Counter()
-    for row in worksheet.iter_rows(
-        min_row=2,
-        min_col=column_index,
-        max_col=column_index,
-    ):
-        cell = row[0]
-        value, status = normalize_hire_date(cell.value)
-        normalized.append(value)
-        statuses[status] += 1
-        number_formats[cell.number_format] += 1
-
-    xml_stats = inspect_hire_date_serials(source, column_index)
+def normalize_hire_dates(values: pd.Series) -> tuple[pd.Series, dict]:
+    stripped = values.astype("string").str.strip()
+    missing = stripped.isna() | stripped.eq("")
+    parsed = pd.to_datetime(
+        stripped.mask(missing),
+        format=SOURCE_HIRE_DATE_FORMAT,
+        errors="coerce",
+    )
+    invalid = ~missing & parsed.isna()
+    if invalid.any():
+        raise ValueError(
+            f"Hire_Date contains {int(invalid.sum())} values outside the required "
+            f"format {SOURCE_HIRE_DATE_FORMAT}"
+        )
+    if missing.any():
+        raise ValueError(f"Hire_Date contains {int(missing.sum())} missing values")
+    time_components_removed = int(
+        (
+            (parsed.dt.hour != 0)
+            | (parsed.dt.minute != 0)
+            | (parsed.dt.second != 0)
+            | (parsed.dt.microsecond != 0)
+        ).sum()
+    )
+    normalized = parsed.dt.strftime("%Y-%m-%d").astype("string")
     stats = {
-        "calendar_dates_preserved": statuses["calendar_date"],
-        "values_converted_to_iso": statuses["calendar_date"],
-        "unresolved_time_only": statuses["time_only"],
-        "unresolved_missing": statuses["missing"],
-        "unresolved_unrecognized": statuses["unrecognized"],
-        "excel_number_formats": dict(sorted(number_formats.items())),
-        "raw_xml_serials": xml_stats,
+        "source_format": "YYYY-MM-DD HH:MM:SS.ffffff",
+        "calendar_dates_preserved": len(normalized),
+        "values_converted_to_iso": len(normalized),
+        "time_components_removed": time_components_removed,
+        "unresolved": 0,
+        "minimum_date": normalized.min(),
+        "maximum_date": normalized.max(),
+        "unique_dates": int(normalized.nunique()),
     }
-    return pd.Series(normalized, dtype="string"), stats
-
-
-def inspect_hire_date_serials(source: Path, column_index: int) -> dict:
-    namespace = {"main": "http://schemas.openxmlformats.org/spreadsheetml/2006/main"}
-    column_letter = get_column_letter(column_index)
-    with ZipFile(source) as archive:
-        root = ET.fromstring(archive.read("xl/worksheets/sheet1.xml"))
-    values: list[float] = []
-    for cell in root.findall(".//main:c", namespace):
-        reference = cell.attrib.get("r", "")
-        if not reference.startswith(column_letter):
-            continue
-        row_text = reference[len(column_letter) :]
-        if not row_text.isdigit() or int(row_text) < 2:
-            continue
-        value_node = cell.find("main:v", namespace)
-        if value_node is not None:
-            values.append(float(value_node.text))
-    return {
-        "numeric_cells": len(values),
-        "date_serial_ge_1": sum(value >= 1 for value in values),
-        "fraction_between_0_and_1": sum(0 <= value < 1 for value in values),
-        "negative": sum(value < 0 for value in values),
-    }
+    return normalized, stats
 
 
 def load_source(source: Path) -> tuple[pd.DataFrame, dict]:
-    frame = pd.read_excel(source, engine="openpyxl")
-    frame = frame.rename(columns={frame.columns[0]: ID_COLUMN})
+    frame = pd.read_csv(source)
     if list(frame.columns) != EXPECTED_SOURCE_COLUMNS:
         raise ValueError(
             "Unexpected source columns. "
             f"Expected {EXPECTED_SOURCE_COLUMNS}, got {list(frame.columns)}"
         )
-    hire_dates, date_stats = read_hire_dates(source)
-    if len(hire_dates) != len(frame):
-        raise ValueError("Hire_Date cell count does not match source row count")
-    frame["Hire_Date"] = hire_dates
+    frame["Hire_Date"], date_stats = normalize_hire_dates(frame["Hire_Date"])
     return frame, date_stats
 
 
@@ -222,46 +172,6 @@ def normalize_and_validate(frame: pd.DataFrame) -> tuple[pd.DataFrame, dict]:
     return output, quality
 
 
-def validate_clean_reference(
-    prepared: pd.DataFrame,
-    clean_reference: Path,
-) -> dict:
-    reference = pd.read_csv(
-        clean_reference,
-        usecols=[ID_COLUMN, "Hire_Date"],
-        dtype={ID_COLUMN: "string", "Hire_Date": "string"},
-    )
-    reference[ID_COLUMN] = reference[ID_COLUMN].str.strip()
-    if reference[ID_COLUMN].duplicated().any():
-        raise ValueError("Clean reference contains duplicate Employee_ID values")
-    joined = prepared[[ID_COLUMN, "Hire_Date"]].merge(
-        reference,
-        on=ID_COLUMN,
-        how="outer",
-        suffixes=("_raw", "_reference"),
-        validate="many_to_one",
-        indicator=True,
-    )
-    if not (joined["_merge"] == "both").all():
-        raise ValueError("Employee_ID sets differ between raw workbook and clean reference")
-    grounded = joined["Hire_Date_raw"].notna()
-    reference_dates = pd.to_datetime(
-        joined.loc[grounded, "Hire_Date_reference"],
-        format="%Y-%m-%d",
-        errors="raise",
-    ).dt.strftime("%Y-%m-%d")
-    matches = joined.loc[grounded, "Hire_Date_raw"].reset_index(drop=True).eq(
-        reference_dates.reset_index(drop=True)
-    )
-    if not matches.all():
-        raise ValueError("Grounded Hire_Date values disagree with clean reference")
-    return {
-        "employee_ids_matched": len(joined),
-        "grounded_dates_matched": int(matches.sum()),
-        "reconstructed_reference_dates_not_used": int((~grounded).sum()),
-    }
-
-
 def make_split_assignments(frame: pd.DataFrame) -> tuple[pd.Series, str]:
     target = frame[TARGET_COLUMN].to_numpy()
     ids = frame[ID_COLUMN].astype(str)
@@ -297,10 +207,18 @@ def distribution(series: pd.Series) -> dict[str, int]:
     return {str(int(key)): int(value) for key, value in series.value_counts().sort_index().items()}
 
 
-def prepare_dataset(source: Path, clean_reference: Path, output_dir: Path) -> dict:
+def prepare_dataset(
+    source: Path,
+    output_dir: Path,
+    expected_sha256: str = EXPECTED_SOURCE_SHA256,
+) -> dict:
+    actual_sha256 = sha256_file(source)
+    if actual_sha256 != expected_sha256:
+        raise ValueError(
+            f"Source SHA-256 mismatch: expected {expected_sha256}, got {actual_sha256}"
+        )
     raw, date_stats = load_source(source)
     validated, quality = normalize_and_validate(raw)
-    reference_stats = validate_clean_reference(validated, clean_reference)
 
     prepared = validated.loc[:, [ID_COLUMN, *FEATURE_COLUMNS, TARGET_COLUMN]].copy()
     assignments, split_strategy = make_split_assignments(prepared)
@@ -322,18 +240,15 @@ def prepare_dataset(source: Path, clean_reference: Path, output_dir: Path) -> di
         raise AssertionError("Excluded columns must not be model features")
 
     metadata = {
-        "status": "DATE_REVIEW_REQUIRED" if date_stats["unresolved_time_only"] else "READY",
-        "data_version": sha256_file(source),
+        "status": "DATA_PREPARATION_READY",
+        "data_version": actual_sha256,
         "source": {
             "filename": source.name,
-            "sha256": sha256_file(source),
+            "sha256": actual_sha256,
+            "expected_sha256": expected_sha256,
+            "hash_verified": True,
             "rows": len(raw),
             "columns": len(raw.columns),
-        },
-        "clean_reference": {
-            "filename": clean_reference.name,
-            "sha256": sha256_file(clean_reference),
-            **reference_stats,
         },
         "feature_set_version": FEATURE_SET_VERSION,
         "feature_order": FEATURE_COLUMNS,
@@ -374,13 +289,11 @@ def prepare_dataset(source: Path, clean_reference: Path, output_dir: Path) -> di
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--source-xlsx", type=Path, required=True)
-    parser.add_argument("--clean-reference-csv", type=Path, required=True)
+    parser.add_argument("--source-csv", type=Path, required=True)
     parser.add_argument("--output-dir", type=Path, default=Path("data/processed"))
     arguments = parser.parse_args()
     metadata = prepare_dataset(
-        arguments.source_xlsx,
-        arguments.clean_reference_csv,
+        arguments.source_csv,
         arguments.output_dir,
     )
     summary = {
@@ -389,7 +302,7 @@ def main() -> None:
         "development_rows": metadata["split"]["development_rows"],
         "final_test_rows": metadata["split"]["final_test_rows"],
         "calendar_dates_preserved": metadata["date_handling"]["calendar_dates_preserved"],
-        "unresolved_hire_dates": metadata["date_handling"]["unresolved_time_only"],
+        "unresolved_hire_dates": metadata["date_handling"]["unresolved"],
         "age_tenure_anomalies": metadata["quality"][
             "age_minus_years_at_company_below_18"
         ],

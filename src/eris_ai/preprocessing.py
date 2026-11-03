@@ -57,6 +57,7 @@ class HireDateToDaysTransformer(BaseEstimator, TransformerMixin):
     """Convert ISO calendar dates to days from 1970-01-01 without changing the date."""
 
     def fit(self, X, y=None):  # noqa: N803
+        self.n_features_in_ = np.asarray(X, dtype=object).reshape(len(X), -1).shape[1]
         return self
 
     def transform(self, X):  # noqa: N803
@@ -80,6 +81,10 @@ class HireDateToDaysTransformer(BaseEstimator, TransformerMixin):
             converted[index] = float((parsed.normalize() - DATE_EPOCH).days)
         return converted.reshape(-1, 1)
 
+    def get_feature_names_out(self, input_features=None):
+        name = "Hire_Date" if input_features is None else str(input_features[0])
+        return np.asarray([f"{name}_days_since_1970_01_01"], dtype=object)
+
 
 class EducationOrdinalTransformer(BaseEstimator, TransformerMixin):
     """Apply the documented education order after fold-local imputation."""
@@ -89,6 +94,7 @@ class EducationOrdinalTransformer(BaseEstimator, TransformerMixin):
         unknown = sorted({str(value) for value in values if str(value) not in EDUCATION_ORDER})
         if unknown:
             raise ValueError(f"Unknown Education_Level values: {unknown}")
+        self.n_features_in_ = np.asarray(X, dtype=object).reshape(len(X), -1).shape[1]
         return self
 
     def transform(self, X):  # noqa: N803
@@ -99,6 +105,10 @@ class EducationOrdinalTransformer(BaseEstimator, TransformerMixin):
             raise ValueError(f"Unknown Education_Level values: {unknown}")
         return np.asarray([mapping[str(value)] for value in values], dtype=float).reshape(-1, 1)
 
+    def get_feature_names_out(self, input_features=None):
+        name = "Education_Level" if input_features is None else str(input_features[0])
+        return np.asarray([f"{name}_ordinal"], dtype=object)
+
 
 def select_model_features(frame: pd.DataFrame) -> pd.DataFrame:
     missing = [column for column in FEATURE_COLUMNS if column not in frame.columns]
@@ -107,7 +117,9 @@ def select_model_features(frame: pd.DataFrame) -> pd.DataFrame:
     return frame.loc[:, FEATURE_COLUMNS].copy()
 
 
-def build_preprocessor() -> ColumnTransformer:
+def build_preprocessor(
+    *, scale_numeric: bool = True, include_diagnostic_features: bool = False
+) -> ColumnTransformer:
     """Return an unfitted transformer suitable for use inside cross-validation."""
 
     categorical_pipeline = Pipeline(
@@ -119,30 +131,32 @@ def build_preprocessor() -> ColumnTransformer:
             ),
         ]
     )
-    numeric_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
-    )
-    date_pipeline = Pipeline(
-        steps=[
-            ("to_days_since_1970_01_01", HireDateToDaysTransformer()),
-            ("imputer", SimpleImputer(strategy="median")),
-            ("scaler", StandardScaler()),
-        ]
-    )
-    education_pipeline = Pipeline(
-        steps=[
-            ("imputer", SimpleImputer(strategy="most_frequent")),
-            ("ordinal", EducationOrdinalTransformer()),
-            ("scaler", StandardScaler()),
-        ]
-    )
+    numeric_steps = [("imputer", SimpleImputer(strategy="median"))]
+    date_steps = [
+        ("to_days_since_1970_01_01", HireDateToDaysTransformer()),
+        ("imputer", SimpleImputer(strategy="median")),
+    ]
+    education_steps = [
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("ordinal", EducationOrdinalTransformer()),
+    ]
+    if scale_numeric:
+        numeric_steps.append(("scaler", StandardScaler()))
+        date_steps.append(("scaler", StandardScaler()))
+        education_steps.append(("scaler", StandardScaler()))
+    numeric_pipeline = Pipeline(steps=numeric_steps)
+    date_pipeline = Pipeline(steps=date_steps)
+    education_pipeline = Pipeline(steps=education_steps)
     return ColumnTransformer(
         transformers=[
-            ("categorical", categorical_pipeline, CATEGORICAL_COLUMNS),
-            ("numeric", numeric_pipeline, NUMERIC_COLUMNS),
+            (
+                "categorical", categorical_pipeline,
+                CATEGORICAL_COLUMNS + (["Job_Title"] if include_diagnostic_features else []),
+            ),
+            (
+                "numeric", numeric_pipeline,
+                NUMERIC_COLUMNS + (EXCLUDED_COLUMNS[1:] if include_diagnostic_features else []),
+            ),
             ("hire_date", date_pipeline, ["Hire_Date"]),
             ("education", education_pipeline, ["Education_Level"]),
         ],
