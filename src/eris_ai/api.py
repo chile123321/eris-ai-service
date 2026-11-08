@@ -1,4 +1,5 @@
 import os
+import logging
 import secrets
 from contextlib import asynccontextmanager
 from typing import Annotated, Any
@@ -34,7 +35,10 @@ class BatchRequest(BaseModel):
         return self
 
 
-def create_app(service_key: str | None = None):
+def create_app(
+    service_key: str | None = None,
+    *, demo_enabled: bool | None = None, demo_bundle_path: str | None = None,
+):
     @asynccontextmanager
     async def lifespan(app):
         app.state.key = (
@@ -43,6 +47,21 @@ def create_app(service_key: str | None = None):
         if len(app.state.key) < 24 or app.state.key.startswith("replace-"):
             raise RuntimeError("Set ERIS_SERVICE_KEY to a random secret of at least 24 characters")
         app.state.model = None
+        enabled = demo_enabled if demo_enabled is not None else (
+            os.getenv("ERIS_MEXWELL_DEMO_ENABLED", "").lower() == "true"
+        )
+        bundle_path = demo_bundle_path if demo_bundle_path is not None else os.getenv(
+            "ERIS_MEXWELL_DEMO_BUNDLE", ""
+        )
+        if enabled and bundle_path:
+            from eris_ai.mexwell_demo import MexwellDemo
+            try:
+                app.state.model = MexwellDemo.load(bundle_path)
+            except Exception as error:
+                # Keep health available, fail inference closed; do not log bundle contents.
+                logging.getLogger(__name__).error(
+                    "Mexwell demo bundle could not be loaded (%s)", type(error).__name__
+                )
         yield
 
     app = FastAPI(title="ERIS AI Service", version="0.1.0", lifespan=lifespan)
@@ -66,8 +85,9 @@ def create_app(service_key: str | None = None):
 
     @app.get("/ready", dependencies=protected)
     def ready():
-        require_model()
-        return {"status": "ready"}
+        model = require_model()
+        return {"status": "ready", "demo_mode": True,
+                "validation_status": model.metadata["validation_status"]}
 
     @app.get("/v1/model-info", dependencies=protected)
     def model_info():
@@ -79,7 +99,23 @@ def create_app(service_key: str | None = None):
         responses={401: {"description": "Unauthorized"}, 503: {"description": "Model unavailable"}},
     )
     def predict(request: PredictRequest):
-        return require_model().predict(request.schema_version, [request.employee])
+        model = require_model()
+        try:
+            return model.predict(request.schema_version, request.employee)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(503, "Demo inference failed verification") from error
+
+    @app.post("/v1/explain", dependencies=protected)
+    def explain(request: PredictRequest):
+        model = require_model()
+        try:
+            return model.explain(request.schema_version, request.employee)
+        except ValueError as error:
+            raise HTTPException(422, str(error)) from error
+        except RuntimeError as error:
+            raise HTTPException(503, "Demo explanation failed verification") from error
 
     @app.post(
         "/v1/predict-batch",
@@ -87,7 +123,8 @@ def create_app(service_key: str | None = None):
         responses={401: {"description": "Unauthorized"}, 503: {"description": "Model unavailable"}},
     )
     def predict_batch(request: BatchRequest):
-        return require_model().predict(request.schema_version, request.employees)
+        require_model()
+        raise HTTPException(503, "Batch is not enabled for the Mexwell demo")
 
     return app
 

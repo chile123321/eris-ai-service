@@ -1,6 +1,6 @@
 # ERIS AI Service
 
-Dịch vụ FastAPI dành cho model giữ chân nhân viên của ERIS. Repository hiện ở trạng thái khởi tạo: chưa chọn dataset, feature, thuật toán, ngưỡng phân loại hoặc model triển khai.
+Dịch vụ FastAPI cho ERIS. Demo Mexwell dùng RF baseline 12 feature để phân loại `Resigned`; trạng thái đánh giá là `NO_QUALIFIED_MEXWELL_MODEL`, chưa đủ điều kiện sử dụng thực tế.
 
 ## Yêu cầu và cài đặt
 
@@ -20,7 +20,20 @@ File `.env` được nạp tự động khi chạy từ thư mục repository. B
 uvicorn eris_ai.api:app --host 127.0.0.1 --port 8000
 ```
 
-`GET /health` hoạt động khi service khởi động. `/ready`, `/v1/model-info`, `/v1/predict` và `/v1/predict-batch` yêu cầu header `X-ERIS-Service-Key`; các endpoint này trả `503 Model is not configured` cho đến khi có model thật đã được đánh giá và tích hợp.
+`GET /health` hoạt động khi service khởi động. Các endpoint khác yêu cầu header `X-ERIS-Service-Key`. Inference trả 503 nếu chưa bật demo hoặc bundle thiếu/không hợp lệ. `/v1/predict-batch` chưa được bật cho demo.
+
+## Demo predict một người và TreeSHAP
+
+Chạy từ thư mục repo; giữ nguyên `.env` và service key. Lệnh tạo bundle xác minh development, fit RF một lần và tái sử dụng nếu bundle đã tồn tại; không mở final test.
+
+```powershell
+.venv\Scripts\python.exe -m eris_ai.mexwell_demo
+$env:ERIS_MEXWELL_DEMO_ENABLED = "true"
+$env:ERIS_MEXWELL_DEMO_BUNDLE = "artifacts/mexwell_rf12_demo_v1/bundle.joblib"
+.venv\Scripts\python.exe -m uvicorn eris_ai.api:app --host 127.0.0.1 --port 8000
+```
+
+`POST /v1/predict` và `POST /v1/explain` cùng nhận `schema_version="mexwell-12-v1"` và `employee` gồm `employee_id`, `features`. Schema đủ 12 feature xem tại `GET /v1/model-info`; ID chỉ để đối chiếu. Điểm là `predict_proba(Resigned=1)`, không có horizon 90 ngày. TreeSHAP dùng thống kê đường đi trên development trong RF, gộp one-hot về feature gốc; base value và đóng góp có đơn vị xác suất (0–1). Sai số cộng tối đa `1e-8`; đối chiếu hai lần suy luận dùng `1e-12` do RF cộng song song. SHAP giải thích hành vi dự đoán, không khẳng định nguyên nhân nghỉ việc. Chỉ nạp bundle joblib nội bộ đáng tin cậy.
 
 ## Kiểm tra
 
@@ -30,7 +43,7 @@ ruff check .
 node --test integration/node/ai-client.test.cjs
 ```
 
-## Còn chờ dataset thật
+## Chuẩn bị dữ liệu và baseline
 
 Nguồn chuẩn bị dữ liệu là CSV gốc có SHA-256 được xác minh. `Hire_Date` được parse theo format rõ ràng `YYYY-MM-DD HH:MM:SS.ffffff`, giữ nguyên ngày lịch và loại phần giờ. Không đưa dataset, dự đoán cấp nhân viên hoặc model artifact vào Git.
 

@@ -9,7 +9,7 @@ SERVICE_KEY = "test-service-key-at-least-24-characters"
 
 @pytest.fixture
 def client():
-    with TestClient(create_app(service_key=SERVICE_KEY)) as test_client:
+    with TestClient(create_app(service_key=SERVICE_KEY, demo_enabled=False)) as test_client:
         yield test_client
 
 
@@ -34,6 +34,10 @@ def test_status_endpoints_report_unconfigured_model(client, path):
     [
         (
             "/v1/predict",
+            {"schema_version": "unconfigured", "employee": {"employee_id": "1", "features": {}}},
+        ),
+        (
+            "/v1/explain",
             {"schema_version": "unconfigured", "employee": {"employee_id": "1", "features": {}}},
         ),
         (
